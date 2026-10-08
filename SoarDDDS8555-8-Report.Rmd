@@ -1,0 +1,1865 @@
+---
+title: "Assignment 8: Build & Evaluate Time Series, Regression, and Classification Models"
+subtitle: "SoarDDDS8555-8 - The Interpretation Report of the Python Analysis"
+author: "Soar, Donald"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+fontsize: 11pt
+geometry: margin=1in
+always_allow_html: yes
+---
+
+```{r}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "90%"
+)
+
+library(knitr)
+library(kableExtra)
+
+project_root <- getwd()
+
+table_path <- function(filename) {
+  file.path(project_root, "output", "tables", filename)
+}
+
+figure_path <- function(filename) {
+  file.path(project_root, "output", "figures", filename)
+}
+
+result_path <- function(filename) {
+  file.path(project_root, "output", "results", filename)
+}
+
+submission_path <- function(filename) {
+  file.path(project_root, "output", "submissions", filename)
+}
+
+read_output_table <- function(filename) {
+  path <- table_path(filename)
+  if (file.exists(path)) {
+    read.csv(path, stringsAsFactors = FALSE)
+  } else {
+    NULL
+  }
+}
+
+show_table <- function(data, digits = 4, n = 10) {
+  if (!is.null(data)) {
+    kable(
+      head(data, n),
+      digits = digits,
+      format = "html",
+      caption = NULL
+    ) |>
+      kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width = FALSE
+      )
+  } else {
+    cat("The requested artifact was not found in the output directory.")
+  }
+}
+
+show_figure <- function(filename) {
+  path <- figure_path(filename)
+  if (file.exists(path)) {
+    knitr::include_graphics(path)
+  } else {
+    cat(paste("Figure not found:", filename))
+  }
+}
+
+```
+
+
+# Introduction
+
+Assignment 8 examines the development, validation, interpretation, and external evaluation of predictive models across three major analytical tasks: time-series forecasting, regression, and multiclass classification. The assignment requires the application of statistical and machine-learning methods, quantitative model evaluation, investigation of modeling assumptions, interpretation of findings, and submission of predictions to Kaggle competitions.
+
+The computational analysis was performed in Python. The Python analysis scripts were used for data inspection, exploratory analysis, feature engineering, model development, validation, forecasting, classification, regression, dimension reduction, diagnostic analysis, and generation of competition prediction files. The resulting tables, figures, result files, and submission artifacts were stored in the project's output directories.
+
+This R Markdown document serves as the interpretation report for those Python analyses. Rather than refitting the computationally intensive models during the knitting process, the report reads the durable artifacts produced by the Python workflow and interprets the reported results. This approach separates model computation from reporting while preserving the results used for the final analysis.
+
+A central principle throughout the analysis is the separation of **model development**, **local validation**, and **competition testing**. Validation observations were used to compare models and make model-selection decisions. The competition test observations were kept separate from that process because their target values are unavailable during local model development. Consequently, local validation metrics and Kaggle leaderboard scores answer different questions and should not be treated as interchangeable measures.
+
+The three analytical components are:
+
+ - **Store Sales Time Series Forecasting:** ETS and ARIMA forecasting models were developed and evaluated using a chronological validation period.
+
+- **House Prices Advanced Regression:** two regression approaches were developed using categorical encoding, polynomial terms, interactions, transformations, subset investigation, and PCA-based dimension reduction.
+
+- **San Francisco Crime Classification:** a Decision Tree, Random Forest, and Linear Support Vector Machine were developed and evaluated using multiple multiclass performance measures.
+
+The report emphasizes not only the numerical performance of the models but also what those results mean. Particular attention is given to assumptions, data preparation, validation design, metric interpretation, limitations, and the distinction between predictive performance and statistical interpretation.
+
+# Store Sales Time Series Forecasting
+
+## Dataset and Data Structure
+
+The Store Sales training dataset contains 3,000,888 observations and six variables:
+
+  - `id`
+  - `date`
+  - `store_nbr`
+  - `family`
+  - `sales`
+  - `onpromotion`
+
+The training period extends from January 1, 2013 through August 15, 2017. The data contain 54 stores and 33 product families.
+
+The competition test dataset contains 28,512 observations covering August 16 through August 31, 2017. The training and test data contain the same 1,782 store-family combinations, calculated as 54 stores multiplied by 33 product families. Thus, the forecasting task is to predict future sales for store-family combinations that are represented in the historical training data.
+
+No missing values were detected in the six training variables.
+
+```{r}
+store_summary <- read_output_table("store_sales_dataset_summary.csv")
+show_table(store_summary, digits = 4, n = 20)
+```
+
+
+## Daily Aggregation and Calendar Structure
+
+The original Store Sales dataset contains observations at the store-family-date level. For the required ETS and ARIMA analysis, sales were aggregated across stores and product families to obtain a single daily aggregate sales series.
+
+The resulting observed series contained 1,684 daily observations.
+
+A complete calendar from January 1, 2013 through August 15, 2017 contains 1,688 calendar days. Four dates were absent from the observed training series:
+
+  - December 25, 2013
+  - December 25, 2014
+  - December 25, 2015
+  - December 25, 2016
+
+These dates correspond to Christmas holidays in Ecuador. The missing observations therefore have a meaningful calendar interpretation rather than representing an apparently random pattern of missing dates.
+
+For the ETS and ARIMA models, the four missing Christmas dates were explicitly added to the daily calendar and their aggregate sales were represented as zero. This should not be described as ordinary statistical imputation. Rather, it is a domain-informed representation of the competition data structure in which Christmas corresponds to a day with no recorded sales.
+
+Creating a complete daily index was necessary because standard time-series methods require observations to occur at regular time intervals. The treatment also prevents the forecasting algorithms from interpreting the gaps as irregularly spaced observations.
+
+## Exploratory Time-Series Findings
+
+Daily aggregate sales ranged from approximately 2,512 to 1.463 million, with a mean of approximately 637,556. The unusually small value at the beginning of the observed period and the much larger values later in the series indicate substantial variation in the scale of daily sales.
+
+```{r}
+show_figure("store_sales_daily_trend.png")
+```
+
+
+The time-series plot indicates that sales are not adequately characterized by a constant mean. Instead, the series exhibits substantial temporal variation, including changing levels and recurring weekly patterns.
+
+This finding is important because it provides a substantive reason to consider forecasting methods that can represent both level and temporal structure. It also cautions against relying exclusively on a simple overall mean as a forecasting mechanism.
+
+## Weekly Seasonality
+
+The analysis examined aggregate sales by day of the week.
+
+| **Day**    | **Mean Sales** |
+|:---        | ---:           |
+| Monday     | 617,542.71     |
+| Tuesday    | 569,926.09     |
+| Wednesday  | 593,244.55     |
+| Thursday   | 505,269.20     |
+| Friday     | 579,574.36     |
+| Saturday   | 772,205.59     |
+| Sunday     | 825,218.12     |
+
+Sunday had the highest mean aggregate sales, followed by Saturday. 
+
+Thursday had the lowest mean sales.
+
+```{r}
+show_figure("store_sales_weekly_seasonality.png")
+```
+
+
+The difference between weekday and weekend sales provides direct evidence of a recurring weekly pattern. In particular, the higher average sales on Saturday and Sunday indicate that the series contains a meaningful seven-day seasonal component.
+
+This finding supports the use of a seasonal period of seven in the ETS model. It also provides context for interpreting the ARIMA results and benchmark performance: models that incorporate recent weekly structure have access to information that a simple overall-level forecast does not use.
+
+## New Year's Day Effect
+
+The analysis also examined sales around New Year's Day because holidays can generate observations that differ substantially from normal daily demand.
+
+Aggregate January 1 sales were:
+
+| **Year** | **January 1 Sales** |
+|:---      |---:                 |
+| 2013     |  2,511.62           |
+| 2014     |  8,602.07           |
+| 2015     | 12,773.62           |
+| 2016     | 16,433.39           |
+| 2017     | 12,082.50           |
+
+January 2 sales were substantially larger than January 1 sales in every year examined. The reported percentage differences between January 1 and January 2 ranged from approximately 5,049% to 19,652%.
+
+```{r}
+show_figure("store_sales_new_year_effect.png")
+```
+
+
+The magnitude of this difference demonstrates that calendar effects can produce observations that are very different from the surrounding sales pattern. Such observations can have a disproportionate effect on error measures, particularly RMSE, because RMSE places greater weight on large prediction errors.
+
+The New Year's Day analysis therefore provides an important qualification to the forecasting results. A model can capture broad trend and weekly seasonality while still producing relatively large errors around unusual holidays.
+
+# Store Sales Validation Strategy
+
+The forecasting models were evaluated using a chronological holdout rather than a randomly selected train-test split.
+
+The training portion ended on July 30, 2017, and the validation period consisted of July 31 through August 15, 2017.
+
+Thus, the validation design contained:
+
+  - **Training observations:** 1,668
+  - **Validation observations:** 16
+
+```{r}
+show_figure("store_sales_validation_split.png")
+```
+
+
+A chronological validation strategy is appropriate for a forecasting problem because the objective is to predict future observations from information available in the past. Randomly assigning dates to training and validation sets could allow observations from later dates to influence a model that is ostensibly predicting earlier observations. Such a design would not reproduce the information structure of the actual forecasting problem.
+
+The 16-day validation horizon also corresponds closely to the 16-day competition test horizon. This makes the validation exercise more directly relevant to the final forecasting task.
+
+However, the short validation period is also a limitation. With only 16 validation observations, a small number of unusual days can materially affect the reported error metrics. Therefore, the validation results should be interpreted as evidence for this particular forecasting window rather than as definitive evidence that the same model would have identical performance across all future periods.
+
+# Store Sales Benchmark Models
+
+Before evaluating the required ETS and ARIMA models, several benchmark forecasting approaches were considered:
+
+| **Model**            | **MAE**    | **RMSE**     | **MAPE (%)** | **sMAPE (%)** |
+|:---                  |---:        |---:          |---:          |---:           |
+| Naive                | 291,303.74 | 311,024.02   | 37.26        | 30.48         |
+| Seasonal Naive       | 249,339.81 | 287,031.68   | 31.80        | 27.00         |
+| 7-Day Moving Average | 94,043.18  | 109,822.48   | 11.50        | 11.23         |
+| Linear Trend         | 129,341.08 | 146,905.96   | 16.76        | 15.14         |
+| Day-of-Week Mean     | 202,394.80 | 225,628.97   | 23.95        | 27.94         |
+
+The benchmark results provide an important baseline for interpreting the more formal time-series models.
+
+The naive model produced an RMSE of approximately 311,024, while the seasonal-naive model produced an RMSE of approximately 287,032. Both were substantially less accurate than the 7-day moving average, which produced an RMSE of approximately 109,822.
+
+The strong performance of the 7-day moving average suggests that recent local sales levels contain substantial information about the immediate future. Because a seven-day moving average incorporates the most recent weekly cycle, it is also consistent with the previously observed weekly seasonality.
+
+The benchmark results establish a useful standard: ETS and ARIMA should be evaluated not merely on whether they improve upon the weakest naive benchmark, but on whether their additional modeling structure provides meaningful predictive improvement relative to this stronger short-term benchmark.
+
+# ETS Model
+
+## ETS Specification
+
+The required ETS model was specified with:
+
+  -   Exponential smoothing
+  -   Additive trend
+  -   Additive seasonality
+  -   Seasonal period of 7
+  -   Non-damped trend
+
+The seasonal period of seven was selected to represent the observed weekly cycle.
+
+The ETS framework is appropriate for this setting because it models the evolution of the series through components such as level, trend, and seasonality. The model therefore provides an interpretable representation of the recurring weekly structure observed during exploratory analysis.
+
+## ETS Validation Results
+
+The ETS model produced the following validation results:
+
+  -   **MAE = 82,459.79**
+  -   **RMSE = 113,065.78**
+  -   **MAPE = 9.68%**
+  -   **sMAPE = 9.47%**
+
+The ETS model substantially improved upon the naive and seasonal-naive benchmarks. Its MAE of approximately 82,460 was also lower than the 7-day moving-average MAE of approximately 94,043.
+
+However, its RMSE of approximately 113,066 was slightly higher than the 7-day moving-average RMSE of approximately 109,822.
+
+This difference between MAE and RMSE is informative. MAE assigns equal weight to each absolute error, whereas RMSE gives greater influence to unusually large errors. The ETS result therefore indicates that the model produced smaller typical absolute errors but experienced some larger errors that increased its RMSE.
+
+```{r}
+show_figure("store_sales_ets_validation_forecast.png")
+```
+
+
+The ETS forecast plot provides a visual assessment of how the predicted trajectory compares with the observed validation period. The model's use of a weekly seasonal period is particularly relevant given the strong Saturday-Sunday pattern identified during exploratory analysis.
+
+## ETS Residual Investigation
+
+The Python analysis generated an ETS residual artifact for the validation period.
+
+```{r}
+ets_residuals <- read_output_table("store_sales_ets_validation_residuals.csv")
+show_table(ets_residuals, digits = 4, n = 10)
+```
+
+
+Residual analysis is an important component of time-series model evaluation. A well-specified forecasting model should remove as much systematic temporal structure as reasonably possible. If substantial autocorrelation remains in the residuals, then information about the past is still associated with future prediction errors, suggesting that the model has not captured all of the available temporal dependence.
+
+The residual artifact should therefore be examined for:
+
+  - persistent positive or negative runs;
+  - remaining weekly patterns;
+  - unusually large residuals;
+  - changes in residual variance over time; and
+  - evidence of temporal dependence.
+
+The available Python results do not report a numerical Ljung-Box statistic or residual autocorrelation test statistic in the supplied output. Accordingly, this report does **not** invent a numerical diagnostic result. The appropriate conclusion is that residual diagnostics should be considered alongside the validation error measures, while the available artifact provides the evidence for visual examination.
+
+# ARIMA Model
+
+## Candidate ARIMA Specifications
+
+Six candidate ARIMA specifications were evaluated:
+
+  -   ARIMA(1,1,0)
+  -   ARIMA(0,1,1)
+  -   ARIMA(1,1,1)
+  -   ARIMA(2,1,0)
+  -   ARIMA(0,1,2)
+  -   ARIMA(2,1,1)
+
+The models were compared using validation performance rather than selecting a model solely on the basis of in-sample fit.
+
+The selected specification was:
+
+  **ARIMA(1,1,1)**
+
+with:
+
+  -   **Validation RMSE = 111,986.09**
+  -   **Validation MAE = 98,728.22**
+
+```{r}
+arima_eval <- read_output_table("store_sales_arima_model_evaluation.csv")
+show_table(arima_eval, digits = 4, n = 20)
+```
+
+
+The notation ARIMA(1,1,1) indicates one autoregressive term, first-order differencing, and one moving-average term. The first-order differencing allows the model to work with changes in the series rather than assuming that the original level is stationary.
+
+The autoregressive component represents dependence on previous values of the differenced series, while the moving-average component represents dependence on previous forecast errors.
+
+## ARIMA Validation Interpretation
+
+The selected ARIMA model substantially outperformed the naive and seasonal-naive benchmarks on the validation period.
+
+Its RMSE of approximately 111,986 was close to the ETS RMSE of approximately 113,066. The difference between the two required models was therefore relatively small on the RMSE metric.
+
+The 7-day moving average nevertheless produced a slightly lower validation RMSE of approximately 109,822. This is an important finding because it demonstrates that greater statistical complexity does not automatically translate into lower out-of-sample error.
+
+The result also illustrates why benchmark models should be included in predictive modeling studies. Without the moving-average benchmark, the ETS and ARIMA results might appear to demonstrate substantial improvement simply because they outperform the naive alternatives. Including a stronger benchmark provides a more demanding comparison.
+
+```{r}
+show_figure("store_sales_arima_validation_forecast.png")
+```
+
+ 
+The ARIMA validation forecast should be interpreted in conjunction with the numerical error measures and residual diagnostics. In particular, the close RMSE values for ETS and ARIMA indicate that the two models captured much of the short-term temporal structure, although they did so through different model formulations.
+
+# ETS and ARIMA Comparison
+
+The two required forecasting models can be summarized as follows:
+
+| **Model**       | **Validation MAE** | **Validation RMSE** |
+|:---             | ---:               | ---:                |
+| ETS             | 82,459.79          | 113,065.78          |
+| ARIMA(1,1,1)    | 98,728.22          | 111,986.09          |
+
+ETS produced the lower MAE, whereas ARIMA(1,1,1) produced the lower RMSE.
+
+This difference illustrates why the choice of evaluation metric matters. The lower ETS MAE indicates smaller average absolute errors, while the lower ARIMA RMSE indicates that ARIMA had a slightly smaller error after giving additional weight to large deviations.
+
+The difference in RMSE is approximately 1,080, which is small relative to the overall scale of aggregate daily sales. Therefore, the validation evidence indicates that the two required models performed similarly on this particular 16-day forecasting horizon rather than demonstrating a large separation in predictive performance.
+
+The 7-day moving average produced a slightly lower RMSE than either required model. This finding should be reported because it is part of the empirical evaluation, while recognizing that ETS and ARIMA were the specifically required statistical forecasting models.
+
+The broader substantive finding is that **recent sales levels and weekly temporal structure are highly informative for short-horizon aggregate sales forecasting**.
+
+# Store Sales Test Forecasting
+
+After the validation analysis was completed, the ETS and ARIMA models were refit using the available historical training data and used to generate forecasts for August 16 through August 31, 2017.
+
+The competition test period contains 16 days.
+
+The Python analysis generated:
+
+  -   ETS test forecasts;
+  -   ARIMA test forecasts;
+  -   forecast summaries;
+  -   ARIMA residual summaries;
+  -   model parameter files; and
+  -   final prediction artifacts.
+
+The competition test data do not contain the observed sales values required to calculate ordinary local forecast errors. Consequently, the test forecasts cannot be evaluated using MAE or RMSE within the local analysis.
+
+This distinction is essential:
+
+> **Validation data provide the observed outcomes required for model comparison, whereas the competition test data are used to generate predictions that are subsequently evaluated by Kaggle against hidden target values.**
+
+## Kaggle Submission Evidence — Store Sales
+
+The Python workflow generated separate submission files for the two required forecasting models. The reported Kaggle scores were:
+
+| **Number** | **Model** | **Kaggle Score** | **File Name**                  |
+|:---        |:---       |---:              |:---                            |
+| 1          | **ETS**   | 0.65101          | `store_sales_ets_submission`   |
+| 2          | **ARIMA** | 0.45808          | `store_sales_arima_submission` |
+
+The submission evidence is included below.
+
+```{r}
+show_figure("ETS_and_ARIMA_Evidence_of_Kaggle_Submission.png")
+```
+
+The Kaggle scores should be interpreted separately from the local validation metrics. The local validation results were available during model development, whereas the Kaggle score represents evaluation using the competition's hidden evaluation data and competition-specific scoring procedure.
+
+Accordingly, a difference between local validation performance and Kaggle performance is not necessarily evidence of an error. It can result from differences between the validation window and the hidden competition evaluation data, as well as from the characteristics of the competition scoring metric.
+
+## Store Sales Assumptions and Limitations
+
+Several assumptions and limitations should be considered when interpreting the Store Sales results.
+
+### Regular time intervals
+
+ETS and ARIMA assume an appropriately structured time series. The four missing Christmas dates were therefore explicitly represented in the daily calendar before model fitting. This creates the regular temporal index required by the forecasting procedure.
+
+### Treatment of Christmas observations
+
+The four missing Christmas dates were represented as zero sales because they correspond to Christmas holidays in the source data. This is a domain-informed data representation rather than a generic missing-value replacement.
+
+Nevertheless, this decision should be recognized as an assumption. If the missing dates represented unobserved rather than zero sales, the resulting forecasts could differ.
+
+### Weekly seasonality
+
+The analysis provides strong descriptive evidence of a seven-day sales cycle. This supports the seven-period seasonal specification used by ETS.
+
+### Validation horizon
+
+Only 16 observations were used for validation. As a result, individual unusual observations can materially influence MAE, RMSE, MAPE, and sMAPE. The reported metrics should therefore be interpreted as performance for this validation horizon rather than as a universal estimate of future forecasting accuracy.
+
+### Aggregation
+
+The required ETS and ARIMA analysis was performed on aggregate daily sales. This reduces the dimensionality of the original dataset substantially, but it also removes store-specific and product-family-specific information.
+
+A model built separately for each store-family combination could potentially capture heterogeneous demand patterns that are lost through aggregation. Such an approach, however, represents a different modeling strategy from the aggregate series analyzed here.
+
+### Holiday and external predictors
+
+The ETS and ARIMA models primarily use the historical sales series. Additional information such as promotions, oil prices, store characteristics, and known holidays could potentially improve forecasts because these variables may explain systematic changes that cannot be inferred solely from historical aggregate sales.
+
+### Residual independence
+
+A useful forecasting model should leave residuals with limited remaining systematic temporal dependence. The saved residual artifacts should therefore be examined for autocorrelation, recurring weekly structure, and changes in variance. Because numerical residual test statistics were not included in the supplied results, no unsupported numerical conclusion is made here.
+
+Overall, the Store Sales analysis provides evidence that both ETS and ARIMA can represent the temporal structure of the aggregate series, while the benchmark results demonstrate that a simple seven-day moving average remains highly competitive for the short validation horizon.
+
+
+**Store Sales Forecasting: Validation and Model Evaluation**
+
+***Validation Strategy***
+
+The forecasting models were evaluated using a chronological holdout rather than a random train-validation split. The training period ended on July 30, 2017, and the validation period covered July 31 through August 15, 2017.
+
+Thus, the forecasting experiment consisted of:
+
+  •	  **Training observations**: 1,668 daily observations
+  •	  **Validation observations**: 16 daily observations
+  
+A chronological split is appropriate because forecasting models are intended to predict future observations using information available at the forecasting origin. Randomly assigning observations to training and validation sets could allow information from later dates to influence model development and would therefore provide a less realistic estimate of forecasting performance.
+
+```{r}
+show_figure("store_sales_validation_split.png")
+```
+
+
+The relatively short validation horizon should be considered when interpreting the results. Sixteen observations provide useful evidence for short-term forecasting performance, but they do not establish that the same performance would occur over substantially longer forecasting horizons or under different seasonal conditions.
+
+**Benchmark Forecasting Models**
+
+Before evaluating the required ETS and ARIMA models, several benchmark forecasting methods were examined.
+
+|**Model**             |**MAE**     |**RMSE**    |**MAPE (%)** |**sMAPE (%) **  |
+|:---                  |---:        |---:        |---:         |---:            |
+|Naive	               |291,303.74	|311,024.02	 | 37.26	     | 30.48          |
+|Seasonal Naive	       |249,339.81	|287,031.68	 | 31.80       | 27.00          |
+|7-Day Moving Average	 | 94,043.18	|109,822.48	 | 11.50       | 11.23          |
+|Linear Trend	         |129,341.08	|146,905.96	 | 16.76	     | 15.14          |
+|Day-of-Week Mean	     |202,394.80	|225,628.97	 | 23.95	     | 27.94          |
+
+The benchmark results provide an important reference point for interpreting the required models. The 7-day moving average produced the lowest RMSE and MAE among the benchmark methods. Its performance indicates that recent local sales levels contain substantial information about near-term demand.
+
+The poor performance of the ordinary naive forecast demonstrates that simply carrying the most recent observation forward does not adequately represent the variability of the aggregate sales series. The seasonal-naive approach improved upon the ordinary naive method, which is consistent with the evidence of weekly seasonality.
+
+The substantially stronger performance of the 7-day moving average suggests that smoothing recent observations is particularly useful for this short forecasting horizon. This does not eliminate the value of ETS or ARIMA; instead, it establishes a meaningful benchmark against which the statistical models can be evaluated.
+
+# ETS Model
+
+## Model Specification
+
+The required ETS model was specified with:
+
+  •	  Exponential smoothing
+  •	  Additive trend
+  •	  Additive seasonality
+  •	  Seasonal period of 7
+  •	  Non-damped trend
+
+The seasonal period of seven was selected to represent the observed weekly cycle. This specification is substantively supported by the day-of-week analysis, which showed substantially different average sales across the days of the week.
+
+An additive seasonal structure assumes that the seasonal effect is approximately additive on the modeled scale. This is a simplifying assumption because the magnitude of sales varies considerably over time. Consequently, residual diagnostics remain important for determining whether the specification captures the dominant structure adequately.
+
+##ETS Validation Performance
+
+The ETS model produced the following validation results:
+
+  •	  **MAE**: 82,459.79
+  •	  **RMSE**: 113,065.78
+  •	  **MAPE**: 9.68%
+  •	  **sMAPE**: 9.47%
+
+The ETS model reduced MAE substantially relative to the naive and seasonal-naive benchmarks. Its MAE was also lower than the 7-day moving average.
+
+However, its RMSE of 113,065.78 was slightly higher than the 7-day moving-average RMSE of 109,822.48. This distinction is important because MAE and RMSE emphasize different aspects of predictive error.
+
+MAE assigns equal weight to absolute errors, whereas RMSE places greater emphasis on large errors. The ETS results therefore suggest that the model produced relatively small typical errors but experienced some larger deviations during the validation period.
+
+```{r}
+show_figure("store_sales_ets_validation_forecast.png")
+```
+
+
+The forecast plot should be interpreted together with the numerical metrics. In particular, large departures between observed and forecast sales should be considered in relation to the holiday and weekly patterns identified during exploratory analysis.
+
+## ETS Residual Investigation
+
+Residual analysis was conducted to investigate whether systematic temporal information remained after fitting the ETS model.
+
+```{r}
+ets_residuals <- read_output_table("store_sales_ets_validation_residuals.csv")
+show_table(ets_residuals, digits = 4, n = 20)
+
+```
+
+
+For a well-specified forecasting model, residuals should behave approximately like an uncorrelated series with no obvious remaining seasonal pattern. Residuals should also have a relatively stable variance over time.
+
+The residual artifact provides evidence for examining:
+
+  •	  remaining temporal autocorrelation;
+  •	  persistent weekly patterns;
+  •	  changes in residual variance;
+  •	  unusually large forecast errors; and
+  •	  systematic overprediction or underprediction.
+
+Because the saved analysis does not report a numerical Ljung-Box statistic, a specific residual autocorrelation significance result is not asserted here. This is preferable to reporting a diagnostic statistic that was not actually generated by the analysis.
+
+The residual investigation should therefore be interpreted as a model-diagnostic exercise rather than as proof that the ETS assumptions are perfectly satisfied.
+
+# ARIMA Model
+
+## Candidate Models
+
+Six candidate ARIMA specifications were evaluated:
+
+  •	  ARIMA(1,1,0)
+  •	  ARIMA(0,1,1)
+  •	  ARIMA(1,1,1)
+  •	  ARIMA(2,1,0)
+  •	  ARIMA(0,1,2)
+  •	  ARIMA(2,1,1)
+
+The candidate models differ in their autoregressive and moving-average structures while using first-order differencing.
+
+Model selection was based on validation performance rather than selecting a model solely according to in-sample information criteria. This approach is consistent with the predictive objective of the competition.
+
+```{r}
+arima_eval <- read_output_table("store_sales_arima_model_evaluation.csv")
+show_table(arima_eval, digits = 4, n = 20)
+```
+
+
+The selected specification was **ARIMA(1,1,1)**.
+
+**Interpretation of ARIMA(1,1,1)**
+
+The ARIMA(1,1,1) model combines:
+
+  •	  first-order differencing;
+  •	  an autoregressive component of order one; and
+  •	  a moving-average component of order one.
+
+The first difference allows the model to focus on changes in sales rather than requiring the undifferenced series itself to be stationary. The autoregressive component represents dependence on previous changes, while the moving-average component represents dependence associated with previous forecast errors.
+
+The model therefore provides a structured representation of temporal dependence rather than relying solely on a recent moving average.
+
+## ARIMA Validation Performance
+
+The selected ARIMA(1,1,1) model produced:
+
+  •	  **MAE**: 98,728.22
+  •	  **RMSE**: 111,986.09
+
+The ARIMA model substantially improved upon both the ordinary naive and seasonal-naive benchmarks.
+
+Its RMSE was slightly lower than the ETS RMSE of 113,065.78. However, its RMSE remained slightly higher than the 7-day moving-average benchmark.
+
+```{r}
+show_figure("store_sales_arima_validation_forecast.png")
+```
+
+
+The result illustrates an important principle in predictive modeling: statistical sophistication does not guarantee improved predictive accuracy. The ARIMA model provides a theoretically motivated representation of temporal dependence, but the simple moving-average benchmark remained highly competitive on this particular validation window.
+
+## ETS and ARIMA Comparison
+
+The two required forecasting models can be summarized as follows.
+
+| **Model**	   |**Validation MAE**  |**Validation RMSE**  |
+|:---          |---:                |:---                 |
+| ETS	         | **82,459.79**      | 113,065.78          |
+| ARIMA(1,1,1) | 98,728.22	        | **111,986.09**      |
+
+The comparison produces different conclusions depending on the evaluation metric.
+
+ETS produced the lower MAE, indicating smaller average absolute forecast errors. ARIMA produced the lower RMSE, indicating slightly better performance when larger errors receive greater weight.
+
+The difference in RMSE between the two required models is approximately 1,080, which is relatively small compared with the overall magnitude of aggregate daily sales.
+
+Consequently, the validation results should not be interpreted as demonstrating a universal superiority of one model over the other. Instead, the models exhibit different error profiles.
+
+The 7-day moving average also produced a slightly lower RMSE than either required model. This result is particularly useful because it demonstrates that a simple benchmark can remain competitive even when more formally structured forecasting methods are available.
+
+## Final Store Sales Forecasts
+
+After validation and model comparison, the forecasting models were refitted using the available historical training data and used to generate predictions for the competition test period.
+
+The Store Sales test period covers:
+
+**August 16, 2017 through August 31, 2017**
+for a total of 16 days.
+
+The Python analysis generated:
+
+  •	  ETS test forecasts;
+  •	  ARIMA test forecasts;
+  •	  forecast summaries;
+  •	  residual summaries;
+  •	  model parameter artifacts; and
+  •	  competition submission files.
+
+The competition test set does not contain observed sales values. Therefore, local MAE, RMSE, MAPE, or sMAPE cannot be calculated for these observations.
+
+This distinction is essential:
+
+ > **Validation observations are used to evaluate and select models locally, whereas competition test observations are used to generate predictions for external evaluation**.
+ 
+The test forecasts therefore should not be described as having a locally measured accuracy.
+
+## Kaggle Submission Evidence — Store Sales
+
+The generated submission artifacts document the required ETS and ARIMA competition submissions.
+
+|**Number**  |**Submission	Model**  |**Kaggle Score** |**Submission File**           |
+|:---        |:---                   |---:             |---:                          |
+| 1	         | ETS                   | 0.65101	       | store_sales_ets_submission   |
+| 2	         | ARIMA	               | 0.45808	       | store_sales_arima_submission |
+
+The submission evidence is shown below.
+
+```{r}
+show_figure("ETS_and_ARIMA_Evidence_of_Kaggle_Submission.png")
+```
+
+
+The Kaggle scores provide an external evaluation of the submitted forecasts. They should be distinguished from the local validation metrics because they are calculated using competition test targets that were not available during model development.
+
+## Store Sales Assumptions and Limitations
+
+Several assumptions and limitations affect interpretation of the forecasting results.
+
+### Continuous Time Index
+
+ETS and ARIMA require an appropriately structured time series. Four Christmas dates were absent from the original training observations. Because these dates correspond to known Christmas holidays, they were inserted into the daily calendar with sales set to zero.
+
+This decision is different from conventional statistical missing-value imputation. The value was not estimated from neighboring observations; rather, the analysis treated the absence of recorded sales on Christmas as evidence of zero observed sales.
+
+**Additive ETS Structure**
+
+The ETS specification assumes additive trend and seasonality. Given the changing magnitude of sales over time, this may not completely describe the relationship between seasonal effects and the overall sales level.
+
+**ARIMA Stationarity and Differencing**
+
+The ARIMA model uses first-order differencing to address nonstationarity. The appropriateness of the resulting representation depends on whether differencing adequately removes the nonstationary component without unnecessarily removing useful long-term information.
+
+**Short Validation Horizon**
+
+Only 16 observations were used for local validation. Consequently, individual unusual sales days can materially influence the reported error metrics.
+
+**Aggregation**
+
+The original dataset contains millions of store-family observations, but the required ETS and ARIMA analysis was performed on aggregate daily sales. This makes the problem computationally and conceptually manageable but removes store- and product-family-specific information.
+
+**External Predictors**
+
+The models primarily use historical sales. Additional information such as promotions, holidays, oil prices, store characteristics, and product-family behavior could potentially improve forecasts.
+
+Overall, the forecasting results provide useful evidence about short-term aggregate sales prediction, but they should not be interpreted as a complete model of the underlying store-level demand process.
+House Prices Advanced Regression
+
+**Dataset and Modeling Objective**
+
+The House Prices Advanced Regression Techniques competition provides residential property characteristics for predicting SalePrice.
+
+The training data contain:
+  
+  •	  **1,460 observations**
+  •	  **81 columns**
+
+The competition test data contain:
+
+  •	**1,459 observations**  
+  •	**80 columns**
+  
+The response variable is ***SalePrice***.
+
+The regression analysis used a validation split consisting of:
+
+  •	  **1,168 training observations**
+  •	  **292 validation observations**
+
+The modeling strategy was deliberately designed to address the assignment requirements involving:
+
+  •	  dichotomous and categorical variables;
+  •	  interaction terms;
+  •	  polynomial terms;
+  •	  transformations;
+  •	  subset investigation;
+  •	  dimension reduction; and
+  •	  comparative model evaluation.
+
+The analysis therefore evaluated both an engineered linear regression approach and a PCA-based Ridge regression approach.
+
+# House Prices Feature Engineering
+
+Feature engineering was used to extend the information available to the regression models.
+
+Three polynomial terms were created:
+
+  •	  OverallQual_squared
+  •	  GrLivArea_squared
+  •	  TotalBsmtSF_squared
+
+Three interaction terms were also created:
+
+  •	  OverallQual_x_GrLivArea
+  •	  OverallQual_x_TotalBsmtSF
+  •	  GrLivArea_x_GarageCars
+
+Two age-related variables were created:
+
+  •   HouseAgeAtSale
+  •	  YearsSinceRemodel
+
+These transformations are substantively motivated.
+
+For example, the relationship between living area and sale price may not be strictly linear. A squared living-area term allows the estimated relationship to curve. Similarly, the interaction between overall quality and living area allows the relationship between size and price to vary according to the quality rating of the property.
+
+The age variables provide additional information about the property's condition and lifecycle at the time of sale.
+
+## Categorical and Dichotomous Variables
+
+The feature-engineering process included both numerical and categorical predictors.
+
+The resulting feature set contained:
+
+  •	  **44 numerical predictors**
+  •	  **43 categorical predictors**
+  
+Categorical predictors were represented through one-hot encoding rather than assigning arbitrary numerical values to categories.
+
+This approach is appropriate because categories such as neighborhood or exterior material do not have a natural numerical ordering. One-hot encoding allows the model to estimate category-specific effects relative to a reference category.
+
+After encoding and feature construction, the resulting predictor matrix contained **290 encoded predictors** before PCA.
+
+This high-dimensional representation creates both opportunities and challenges. It allows the model to incorporate substantial property information, but it also increases the possibility of multicollinearity and overfitting.
+
+## Transformation of Sale Price
+
+The response variable was also evaluated using the transformation:
+
+**log1p(SalePrice)**
+
+A logarithmic transformation is particularly relevant for house prices because sale prices are positive and typically right-skewed. The transformation reduces the influence of extremely expensive properties and places greater emphasis on proportional rather than absolute differences.
+
+The analysis therefore reported both raw-scale and log-scale performance.
+
+For Model A:
+
+  •	  Raw-scale RMSE: 63,125.00
+  •	  Log RMSE: 0.1704
+  •	  Log R²: 0.8244
+
+The difference between the raw- and log-scale results demonstrates why the scale of evaluation must be considered when interpreting regression performance.
+
+A model can have substantial dollar-scale errors on expensive homes while still explaining a large proportion of variation on the logarithmic scale.
+
+## Model A — Engineered Linear Regression
+
+**Model Construction**
+
+Model A used the engineered feature set and modeled the log-transformed response.
+The model selected 40 predictors.
+
+The six required polynomial and interaction terms were explicitly checked and were all retained:
+
+|**Engineered Term**         |	**Selected**   |
+|:---                        |:---             |      
+| OverallQual_squared	       | Yes             |
+| GrLivArea_squared	         | Yes             |
+| TotalBsmtSF_squared	       | Yes             |
+| OverallQual_x_GrLivArea	   | Yes             |
+| OverallQual_x_TotalBsmtSF	 | Yes             |
+| GrLivArea_x_GarageCars	   | Yes             |
+
+
+The fact that all six required engineered terms were retained indicates that the feature-selection procedure did not remove these assignment-required terms.
+
+Validation Performance
+
+Model A produced the following validation results:
+
+  •	  **MAE**: 19,594.06
+  •	  **RMSE**: 63,125.00
+  •	  **R²**: 0.4208
+  •	  **Log MAE**: 0.0963
+  •	  **Log RMSE**: 0.1704
+  •	  **Log R²**: 0.8244
+
+The raw-scale R² of 0.4208 and log-scale R² of 0.8244 should not be interpreted as contradictory results. They measure explanatory performance on different response scales.
+
+The substantially higher log-scale R² indicates that the model explains a large proportion of variation after reducing the influence of extreme sale prices.
+
+The raw-scale RMSE remains important because it describes the magnitude of prediction errors in the original dollar units. Consequently, both scales provide useful information about the model.
+
+## Model B — PCA Ridge Regression
+
+Model B was designed to investigate dimension reduction and regularization.
+
+The original encoded predictor matrix contained **290 predictors**.
+
+The predictors were standardized before PCA, and the analysis retained:
+
+  •	  **71 principal components**
+  •	  **95.07% cumulative explained variance**
+
+Thus, PCA reduced the dimensionality from 290 predictors to 71 components while retaining approximately 95% of the variance represented in the original feature matrix.
+
+```{r}
+show_figure("house_prices_required_pca_variance.png")
+```
+
+
+The dimensionality reduction is substantial, but explained variance is not equivalent to predictive information. PCA identifies directions that explain variation in the predictors; it does not select components specifically because they maximize prediction of SalePrice.
+
+This distinction is important when interpreting the model's validation results.
+
+## Model B Validation Performance
+
+The PCA Ridge model produced:
+
+  •	  MAE: 23,791.88
+  •	  RMSE: 127,904.32
+  •	  R²: -1.3779
+  •	  Log MAE: 0.0972
+  •	  Log RMSE: 0.1962
+  •	  Log R²: 0.7673
+
+The negative raw-scale R² indicates that the model's raw-dollar predictions were worse than a baseline that predicts the validation-set mean for every observation.
+
+However, the log-scale results were substantially more reasonable.
+
+The log R² of 0.7673 indicates that the PCA Ridge model captured substantial variation in the transformed response, although less than Model A's log R² of 0.8244.
+
+This result demonstrates that retaining 95.07% of predictor variance does not necessarily retain 95.07% of the information most useful for predicting the response.
+
+## House Prices Model Comparison
+
+The required models can be compared using validation Log RMSE.
+
+|**Model**                                |**Log MAE**  |**Log RMSE** |**Log R²**  |
+|:---                                     |---:         |---:         |---:        |
+| Model A — Engineered Linear Regression	| **0.0963**  | **0.1704**  | **0.8244** |
+| Model B — PCA Ridge Regression	        | 0.0972	    | 0.1962	    | 0.7673     |
+
+The model-selection criterion was validation Log RMSE.
+
+Under this criterion, Model A had the lower validation error.
+
+The difference demonstrates that dimensionality reduction did not automatically improve predictive performance. 
+PCA substantially reduced the feature space and Ridge regression provided regularization, but the resulting model did not capture as much predictive information as the engineered linear model on this validation sample.
+
+The result also illustrates an important distinction between **variance preservation** and **predictive information preservation**. PCA retained 95.07% of predictor variance, but the predictive performance of the PCA Ridge model was lower than that of Model A.
+
+## House Prices Subset Investigation
+
+The regression analysis also investigated predictor subsets.
+
+Model A ultimately used 40 selected predictors rather than the full 290-dimensional encoded feature representation.
+
+Subset selection can provide several benefits:
+
+  •	  reduced model complexity;
+  •	  improved interpretability;
+  •	  reduced opportunity for unnecessary predictors to contribute noise;
+  •	  reduced computational burden; and
+  •	  potentially improved generalization.
+
+However, subset selection also introduces a tradeoff. Removing predictors can eliminate information that contributes to prediction.
+
+For this reason, subset selection should be evaluated using out-of-sample performance rather than assuming that a smaller model is automatically superior.
+
+The analysis explicitly verified that the assignment-required polynomial and interaction terms were retained in the selected model.
+
+## House Prices Regression Assumptions
+
+The regression analysis generated residual and diagnostic artifacts to investigate the assumptions underlying the linear modeling component.
+
+```{r}
+show_figure("house_prices_required_residual_diagnostics.png")
+```
+
+
+```{r}
+show_figure("house_prices_required_residual_distributions.png")
+```
+
+
+
+The principal assumptions considered were linearity, constant variance, independence, residual behavior, and multicollinearity.
+
+**Linearity**
+
+A linear regression model assumes that the systematic relationship between the predictors and the modeled response can be adequately represented by the specified functional form.
+
+The inclusion of squared terms and interaction terms was specifically intended to provide greater flexibility than a use of the log-transformed response is partly motivated by the expectation that proportional errors purely additive linear specification.
+
+The diagnostic plots should be examined for systematic curvature in the residuals. Pronounced curvature would suggest that additional nonlinear structure remains unexplained.
+
+**Constant Variance**
+
+Homoscedasticity assumes that residual variability remains reasonably stable across the range of fitted values.
+
+A funnel-shaped residual pattern would suggest heteroscedasticity. The use of the log-transformed response is partly motivated by the expectation that proportional errors may be more stable than raw-dollar errors.
+
+Nevertheless, the residual diagnostics should be treated as empirical evidence rather than as proof that constant properties can still share characteristics through neighborhoods, variance is perfectly satisfied.
+
+**Independence*
+
+The observations represent individual properties rather than a longitudinal time series. However, properties can still share characteristics through neighborhoods, construction periods, and local market conditions.
+
+Consequently, independence should be interpreted as an approximation appropriate for the predictive modeling framework rather than an absolute statement that all observations are unrelated.
+
+**Residual Distribution**
+
+Residual distributions were examined for skewness and unusually large observations.
+
+A perfectly normal residual distribution is not required for predictive accuracy, but substantial deviations can affect classical inferential procedures and may indicate model misspecification.
+
+Because the primary goal of the assignment is prediction and competition evaluation, the residual diagnostics are interpreted primarily as evidence concerning model adequacy rather than as a requirement for perfect normality.
+
+**Multicollinearity**
+
+The House Prices dataset contains many correlated predictors. This issue becomes more pronounced when polynomial and interaction terms are added.
+
+PCA and Ridge regression provide a useful alternative strategy for addressing correlated predictors. However, the validation results demonstrate that controlling dimensionality and multicollinearity does not automatically produce better predictions.
+
+## House Prices Final Predictions
+
+After validation, the required regression models were refit using the available training data and used to generate predictions for the competition test observations.
+
+The analysis generated:
+
+  •	  1,459 Model A predictions
+  •	  1,459 Model B predictions
+
+The corresponding submission artifacts were:
+  •	  house_prices_model_a_submission.csv
+  •	  house_prices_model_b_submission.csv
+
+Model A was selected according to the predefined validation criterion of Log RMSE.
+
+As with the Store Sales analysis, the competition test observations do not provide observed SalePrice values to the modeling workflow. Therefore, the local validation results provide the basis for model comparison, while Kaggle evaluates the submitted predictions against hidden competition targets.
+
+## Kaggle Submission Evidence — House Prices
+
+The generated submission evidence documents the two required regression submissions.
+
+|**Number**|**Submission	Model**   	|**Kaggle Score**  |**Submission File**                    |
+|:---      |:---                      |---:              |:---                                   |
+| 1	       | Model A	                | 0.14388	         | house_prices_model_a_submission.csv   |
+| 2	       | Model B	                | 0.13335	         | house_prices_model_b_submission.csv   |
+
+House Prices - the submission evidence is included below.
+
+```{r}
+show_figure("House_Price_Model_B_and_Model_A_Evidence_of_Kaggle_Submission.png")
+```
+
+
+The Kaggle scores represent external competition evaluation and should not be conflated with the validation metrics reported earlier in this section. 
+
+The two evaluation environments answer different questions: validation measures performance on observations held out during model development, while Kaggle evaluates predictions against hidden competition targets.
+
+
+# San Francisco Crime Classification
+
+## Dataset and Modeling Objective
+
+The San Francisco Crime Classification competition is a multiclass classification problem in which the objective is to predict the category of a reported crime from information available at the time of the prediction.
+
+The training data contain 878,049 observations and nine original variables. The response variable is `Category`. The competition test data contain 884,262 observations. The original variables include:
+
+  -   `Dates`
+  -   `Category`
+  -   `Descript`
+  -   `DayOfWeek`
+  -   `PdDistrict`
+  -   `Resolution`
+  -   `Address`
+  -   `X`
+  -   `Y`
+
+The analysis intentionally excluded `Descript` and `Resolution` from the primary predictive feature set. 
+
+`Descript` is closely associated with the crime category and would therefore provide information that would not necessarily be available in a realistic prediction setting. `Resolution` can also contain information about the outcome of an incident rather than information available when the crime category must be predicted. Excluding these variables reduces the risk of target leakage.
+
+The primary feature set included temporal, geographic, and categorical information:
+
+  -   `DayOfWeek`
+  -   `PdDistrict`
+  -   `X`
+  -   `Y`
+  -   `date_year`
+  -   `date_month`
+  -   `date_day`
+  -   `date_hour`
+  -   `date_day_of_week`
+
+The SVM analysis additionally incorporated `Address`.
+
+This feature construction allows the models to use recurring temporal patterns, geographic location, police district, and address information without directly using variables that reveal the incident outcome.
+
+## Feature Engineering
+
+The original `Dates` variable was transformed into several calendar features. These included year, month, day, hour, and day-of-week information.
+
+This transformation is important because tree-based models and linear classification models generally require predictors in a structured numerical or categorical representation rather than a raw date-time string.
+
+The resulting temporal variables allow the models to capture relationships such as:
+
+  -   differences between daytime and nighttime incidents;
+  -   differences among days of the week;
+  -   seasonal or monthly variation;
+  -   changes in the distribution of reported crime over calendar years.
+
+The geographic variables `X` and `Y` provide continuous spatial information, while `PdDistrict` provides a categorical representation of police-district location.
+
+The combination of temporal and geographic variables is substantively appropriate because crime patterns can vary across both location and time.
+
+## Validation Strategy
+
+The classification analysis used a separate validation sample rather than evaluating the fitted models on the observations used for training.
+
+The resulting split contained:
+
+  -   **702,439 training observations**
+  -   **175,610 validation observations**
+
+The validation observations were not used to fit the models.
+
+This separation is important because evaluating a model on observations used during training can produce overly optimistic estimates of predictive performance. The validation results therefore provide an out-of-sample assessment of how the fitted classification approaches performed on observations that were not used for model estimation.
+
+The initial baseline classifier achieved:
+
+  -   **Accuracy = 0.1992**
+  -   **Log loss = 28.8641**
+
+The baseline provides a reference point for interpreting the three required models.
+
+Because this is a multiclass problem, accuracy alone is not sufficient for a complete evaluation. Macro F1, weighted F1, and log loss were also examined where available.
+
+# Decision Tree
+
+## Model Development
+
+The first required classification model was a Decision Tree.
+
+Decision Trees recursively partition the predictor space into regions associated with different response classes. The resulting structure is potentially interpretable because individual splits can be understood as decision rules involving predictor values.
+
+For this application, the tree can use combinations of temporal, geographic, and categorical information to identify regions of the feature space associated with different crime categories.
+
+A major advantage of a tree-based approach is that it can represent nonlinear relationships and interactions without requiring those relationships to be explicitly specified in advance.
+
+For example, the relationship between geographic coordinates and crime category does not need to be assumed to be linear. Similarly, the relationship between hour of day and crime category can be represented through sequential splits.
+
+## Decision Tree Validation Results
+
+The Decision Tree achieved the following validation results:
+
+  -   **Accuracy = 0.2683**
+  -   **Log loss = 6.0718**
+  -   **Macro F1 = 0.0901**
+  -   **Weighted F1 = 0.2254**
+
+The accuracy of 0.2683 was higher than the baseline accuracy of 0.1992.
+
+The increase indicates that the tree extracted predictive information from the available temporal, geographic, and categorical features.
+
+The log loss also provides important information because it evaluates the quality of the model's predicted probabilities rather than simply whether the most likely class was correct.
+
+The relatively low macro F1 indicates that predictive performance was not evenly distributed across crime categories. Because macro F1 assigns equal weight to every class, weak performance on less frequent categories can substantially reduce the metric.
+
+Therefore, the Decision Tree's accuracy should not be interpreted as evidence that the model performs equally well for all crime categories.
+
+## Decision Tree Interpretation
+
+The Decision Tree provides a flexible nonlinear classification structure.
+
+Its validation accuracy increased substantially relative to the baseline, demonstrating that the selected predictors contain meaningful information about crime category.
+
+At the same time, the macro F1 score of 0.0901 is considerably lower than the overall accuracy. This difference indicates that performance varies substantially across classes.
+
+This is an important characteristic of multiclass classification. If a small number of common categories account for a large proportion of observations, a model can obtain reasonable overall accuracy while performing poorly on less frequent categories.
+
+Consequently, the Decision Tree results support two simultaneous conclusions:
+
+  1. The predictors contain useful information for predicting crime category.
+  2. Overall accuracy does not adequately describe the model's performance across all categories.
+
+The confusion matrix and class-level metrics should therefore be considered when interpreting the model.
+
+# Random Forest
+
+## Model Development
+
+The second tree-based model was a Random Forest.
+
+Random Forest extends the basic decision-tree approach by constructing an ensemble of trees and combining their predictions. The use of multiple trees can reduce the instability associated with relying on a single tree.
+
+Each tree provides a different view of the predictor space, and the ensemble aggregates these individual models.
+
+This approach is particularly useful when the relationship between predictors and the response is nonlinear and includes interactions.
+
+The Random Forest therefore provides a useful comparison with the single Decision Tree.
+
+## Random Forest Validation Results
+
+The Random Forest achieved:
+
+  -   **Accuracy = 0.2821**
+  -   **Log loss = 2.4049**
+  -   **Macro F1 = 0.0693**
+  -   **Weighted F1 = 0.2055**
+
+The Random Forest accuracy of 0.2821 was higher than the Decision Tree accuracy of 0.2683.
+
+The reduction in log loss was particularly substantial:
+
+  -   Decision Tree log loss = **6.0718**
+  -   Random Forest log loss = **2.4049**
+
+Lower log loss indicates that the Random Forest produced substantially better probabilistic predictions according to this validation measure.
+
+However, the Random Forest macro F1 of 0.0693 was lower than the Decision Tree macro F1 of 0.0901.
+
+Its weighted F1 of 0.2055 was also lower than the Decision Tree's weighted F1 of 0.2254.
+
+These results demonstrate that the Random Forest did not improve every metric simultaneously.
+
+## Random Forest Interpretation
+
+The Random Forest's higher accuracy indicates improved overall classification performance relative to the single Decision Tree according to the validation accuracy measure.
+
+The substantially lower log loss is also important. Log loss penalizes predictions that assign low probability to the class that actually occurs. Therefore, the reduction from 6.0718 to 2.4049 indicates a meaningful difference in probabilistic prediction performance.
+
+At the same time, the lower macro F1 indicates that the Random Forest's performance across individual classes was not uniformly stronger.
+
+This illustrates an important distinction between overall and class-balanced evaluation.
+
+Accuracy weights observations according to their frequency in the validation sample. Macro F1 gives each category equal importance. Consequently, the two metrics answer different questions.
+
+The Random Forest results should therefore be interpreted as evidence of stronger overall accuracy and substantially better log-loss performance, accompanied by lower reported macro and weighted F1 values than the Decision Tree.
+
+# Support Vector Machine
+
+## Model Development
+
+The third required classification approach was a Support Vector Machine implemented using `LinearSVC`.
+
+The model used:
+
+  -   **C = 1.0**
+  -   **Maximum iterations = 2,000**
+
+The SVM analysis incorporated the classification feature representation and additionally included `Address`.
+
+Support Vector Machines seek decision boundaries that separate classes in the predictor space. A linear SVM assumes that the selected representation contains sufficient information for useful approximately linear class boundaries.
+
+The SVM therefore provides a different modeling perspective from the nonlinear tree-based approaches.
+
+## SVM Validation Results
+
+The LinearSVC model achieved:
+
+  -   **Accuracy = 0.2817**
+  -   **Macro F1 = 0.0885**
+  -   **Weighted F1 = 0.2318**
+
+The SVM accuracy was very close to the Random Forest accuracy.
+
+The difference between the two reported accuracy values was only:
+
+  **0.2821 − 0.2817 = 0.0004**
+
+Thus, the two models had nearly identical overall accuracy on the validation sample.
+
+The SVM's macro F1 was higher than the Random Forest's reported macro F1:
+
+  -   Random Forest macro F1 = **0.0693**
+  -   SVM macro F1 = **0.0885**
+
+The SVM also produced a higher weighted F1:
+
+  -   Random Forest weighted F1 = **0.2055**
+  -   SVM weighted F1 = **0.2318**
+
+These results indicate that the SVM produced a different distribution of classification performance across the crime categories.
+
+## SVM Interpretation
+
+The SVM achieved nearly the same overall accuracy as the Random Forest while producing higher macro and weighted F1 values.
+
+This suggests that the SVM's predictions were distributed differently across classes than those of the Random Forest.
+
+The macro F1 result is particularly informative because it gives equal weight to each crime category. A higher macro F1 therefore indicates stronger average class-level F1 performance according to the reported validation metric.
+
+The SVM results also demonstrate the importance of feature representation. A linear classifier can perform competitively when the engineered feature space contains sufficient information to distinguish among classes.
+
+However, the validation results do not establish that the SVM is superior under every possible criterion. Its performance should instead be interpreted in relation to the specific metric being considered.
+
+
+```{r}
+show_figure("crime_svm_confusion_matrix.png")
+```
+
+
+The confusion matrix provides an additional perspective on the SVM results.
+A confusion matrix identifies the relationship between the actual and predicted categories. Large values away from the diagonal indicate categories that the model frequently confuses.
+
+Because the crime problem contains many categories, examining the confusion matrix is useful for identifying whether classification errors are concentrated among particular groups of crime categories.
+
+The confusion matrix should therefore be considered alongside accuracy and F1 measures rather than treated as a secondary visualization only.
+
+# Crime Classification Model Comparison
+
+The three required classification models can be summarized as follows:
+
+|**Model**        |**Accuracy**	  |**Macro F1**   |**Weighted F1** |**Log Loss**  |
+|:---             |---:           |---:           |---:            |---:          |  
+| Decision Tree	  | 0.2683	      | 0.0901	      | 0.2254	       | 6.0718       |
+| Random Forest	  | 0.2821	      | 0.0693	      | 0.2055	       | 2.4049       |
+| Linear SVM	    | 0.2817	      | 0.0885	      | 0.2318	       | Not reported |
+
+
+The validation results demonstrate that the models have similar overall accuracy but differ considerably on other evaluation criteria.
+
+The Decision Tree achieved the highest reported macro F1 among the three models.
+
+The Random Forest achieved the highest reported accuracy and the lowest reported log loss among the models for which log loss was available.
+
+The Linear SVM achieved nearly the same accuracy as the Random Forest while producing higher macro and weighted F1 values.
+
+These differences demonstrate that classification model evaluation is multidimensional.
+
+Accuracy measures the proportion of correctly classified observations. Macro F1 emphasizes equal treatment of classes. Weighted F1 accounts for class frequency while still incorporating precision and recall. Log loss evaluates the quality of predicted probabilities.
+
+Because these metrics measure different aspects of performance, they should not be treated as interchangeable.
+
+Classification Metric Interpretation
+
+**Accuracy**
+
+Accuracy represents the proportion of validation observations for which the predicted crime category matched the observed category.
+
+The Random Forest had an accuracy of 0.2821, the SVM had 0.2817, and the Decision Tree had 0.2683.
+
+The differences are relatively small, particularly between the Random Forest and SVM.
+
+**Macro F1**
+
+Macro F1 calculates F1 separately for each class and then averages the class-specific results.
+
+This metric is useful when performance across minority classes is important.
+The Decision Tree had the highest reported macro F1 at 0.0901, followed closely by the SVM at 0.0885. The Random Forest's macro F1 was 0.0693.
+
+The difference between the accuracy and macro F1 results demonstrates that aggregate accuracy does not fully represent class-level performance.
+
+**Weighted F1**
+
+Weighted F1 accounts for the frequency of each class when averaging the class-specific F1 values.
+
+**The SVM had the highest reported weighted F1 at 0.2318**.
+
+The Decision Tree followed at **0.2254**, while the Random Forest had **0.2055**.
+
+This provides additional evidence that the SVM and Random Forest produced different class-level performance profiles despite their similar overall accuracy.
+
+**Log Loss**
+
+Log loss evaluates the quality of predicted class probabilities.
+
+The Random Forest achieved a validation log loss of 2.4049 compared with 6.0718 for the Decision Tree.
+
+The substantially lower Random Forest log loss indicates that its probabilistic predictions were better calibrated according to this validation metric.
+
+A direct log-loss comparison with the LinearSVC model is not reported because the saved SVM results did not include a corresponding log-loss value.
+
+Classification Assumptions and Diagnostic Considerations
+
+Classification models do not require the same classical assumptions as ordinary least-squares regression. Nevertheless, several important assumptions and modeling considerations were investigated.
+
+**Class Imbalance**
+
+The crime dataset contains many crime categories with substantially different frequencies.
+
+This creates a potential mismatch between overall accuracy and performance on less frequent categories.
+
+The reported macro F1 values provide evidence that class-level performance differs from overall accuracy.
+
+Consequently, accuracy should not be used as the only measure of model performance.
+
+**Independence**
+
+The validation analysis treats the observations as sufficiently independent for the intended predictive evaluation.
+
+However, crime incidents may exhibit temporal and geographic clustering. Incidents occurring close together in time or space may share characteristics.
+
+This means that conventional random validation should be interpreted cautiously because nearby or temporally related observations may be represented in both the training and validation samples.
+
+The reported validation results should therefore be interpreted as estimates for the particular validation design used in the analysis.
+
+**Feature Leakage**
+
+Feature leakage is an especially important consideration in this competition.
+
+The analysis excluded Descript and Resolution from the primary feature set.
+
+This decision is important because these variables can contain information closely related to the target category or information that would not necessarily be available at the time a category prediction must be made.
+
+The remaining predictors are more appropriate for evaluating predictive relationships based on temporal and geographic information.
+
+**Tree-Based Model Complexity**
+
+Decision Trees can overfit when they are allowed to become excessively complex.
+
+A tree can continue splitting the predictor space until highly specific regions are created. Such regions may describe idiosyncrasies of the training observations rather than generalizable patterns.
+
+Random Forest reduces some of the instability associated with a single tree by averaging many trees.
+
+Nevertheless, ensemble methods can still overfit or produce uneven class-level performance, particularly when the underlying classes are imbalanced.
+
+The validation results provide the appropriate evidence for assessing generalization.
+SVM Representation
+
+The LinearSVC model assumes that a useful linear separation can be obtained in the selected feature representation.
+
+This does not mean that the underlying crime-generating process is actually linear.
+Instead, it means that the chosen representation provides a basis from which linear decision boundaries can make useful predictions.
+
+The competitive validation accuracy demonstrates that this representation contains predictive information, although the class-level results show that the problem remains difficult.
+
+**Classification Limitations**
+
+Several limitations should be considered when interpreting the crime classification results.
+
+First, the classification problem contains many response categories. Multiclass prediction is substantially more difficult than binary classification because the model must distinguish among many possible outcomes.
+
+Second, class imbalance can cause overall accuracy to provide an incomplete picture of performance.
+
+Third, geographic and temporal clustering may weaken the assumption that observations are completely independent.
+
+Fourth, the feature representation determines what information the models can learn. Important information that is not included in the predictors cannot be recovered by changing the classification algorithm alone.
+
+Fifth, the validation split represents one particular sample of the training data. Performance could differ under another validation design.
+
+Finally, competition leaderboard performance is an external evaluation and should not be assumed to equal the local validation results.
+
+Kaggle Submission Evidence — San Francisco Crime Classification
+
+The Python analysis generated submission files for all three required classification models.
+
+The reported Kaggle submission results were:
+
+|**Model**                 |**Kaggle Score**    |**Submission File**                    |
+|:---                      |---:                |:---                                   |
+| Decision Tree	           |  6.14240	          | crime_decision_tree_submission.csv    |
+| Random Forest	           |  2.43871	          | crime_random_forest_submission.csv    |
+| Support Vector Machine	 | 24.95636	          | crime_svm_submission.csv              |
+
+
+These scores are external competition results rather than local validation metrics.
+
+The Kaggle score should therefore be interpreted separately from the validation accuracy, F1, and log-loss values reported above.
+
+The submission evidence is included below.
+
+```{r}
+show_figure(
+  "Crime_SVM_and_Random_Forest_and_Decision_Tree_Evidence_of_Kaggle_Submission.png"
+)
+```
+
+
+The screenshot provides visual evidence that the prediction files were submitted to the competition.
+The generated submission artifacts were:
+  •	  crime_decision_tree_submission.csv
+  •	  crime_random_forest_submission.csv
+  •	  crime_svm_submission.csv
+
+The existence of these artifacts demonstrates that predictions were generated for the competition test observations.
+
+Interpretation of Local and Kaggle Results
+
+The distinction between local validation and Kaggle evaluation is especially important for this classification problem.
+
+Local validation evaluates predictions against known labels in a held-out portion of the training data. It therefore permits the calculation of accuracy, F1, and related metrics.
+
+Kaggle evaluates submitted predictions against hidden competition labels.
+
+The two evaluations can differ because:
+  
+  •	  the observations are different;
+  •	  the competition test distribution may differ from the validation distribution;
+  •	  the validation design may not perfectly reproduce the competition evaluation;
+  •	  class frequencies may differ;
+  •	  geographic and temporal patterns may change across the datasets.
+
+Consequently, the Kaggle scores should be reported as external competition results rather than interpreted as direct replacements for the local validation metrics.
+
+## Crime Classification Findings
+
+Several findings are supported by the analysis.
+
+First, all three required models extracted useful information from the available predictors because their validation accuracies exceeded the baseline accuracy of 0.1992.
+
+Second, the Random Forest increased validation accuracy relative to the Decision Tree and produced substantially lower log loss.
+
+Third, the SVM produced accuracy nearly identical to the Random Forest while achieving higher reported macro and weighted F1 values.
+
+Fourth, the Decision Tree produced the highest reported macro F1 among the three models.
+
+These results demonstrate that model performance depends on the metric used for evaluation.
+
+The analysis therefore does not treat a single metric as a complete representation of classification quality. 
+
+Instead, the results are interpreted using accuracy, macro F1, weighted F1, log loss, and the confusion matrix.
+
+The classification analysis also demonstrates the importance of feature construction and leakage control. 
+Excluding variables that directly encode the outcome helps ensure that the models are evaluated using predictors that are more appropriate for the intended prediction task.
+
+# Cross-Analysis Findings
+
+The three analytical components of Assignment 8 demonstrate how model development depends on the structure of the prediction problem, the characteristics of the available data, and the evaluation criterion used to assess performance.
+
+The Store Sales analysis addressed a forecasting problem in which observations are ordered in time. The House Prices analysis addressed a continuous-response regression problem involving numerous numerical and categorical predictors. The San Francisco Crime analysis addressed a high-dimensional multiclass classification problem.
+
+Although the modeling techniques differed substantially, several common findings emerged.
+Model Complexity Does Not Guarantee Better Predictive Performance
+
+One of the most consistent findings across the three analyses is that a more complex model does not automatically produce better validation performance.
+
+For Store Sales, the 7-day moving-average benchmark achieved a validation RMSE of approximately 109,822. This was slightly lower than the RMSE values for both required forecasting models:
+  
+  •	  ETS RMSE = 113,065.78
+  •	  ARIMA(1,1,1) RMSE = 111,986.09
+
+This demonstrates that a relatively simple forecasting method can perform competitively when recent observations contain substantial information about the near-term future.
+
+***The House Prices analysis produced a similar finding***. 
+
+PCA reduced the encoded predictor space from 290 variables to 71 components while retaining approximately 95.07% of the variance. Nevertheless, the PCA Ridge model had a higher validation Log RMSE than the engineered linear regression:
+
+  •	  Engineered Linear Regression Log RMSE = 0.1704
+  •	  PCA Ridge Regression Log RMSE = 0.1962
+
+The dimensionality reduction therefore achieved a substantial reduction in predictor dimensionality without producing better validation performance under the selected metric.
+
+These findings reinforce the principle that model selection should be based on empirical validation rather than the assumption that a more sophisticated algorithm will necessarily generalize better.
+
+***Feature Engineering Can Improve Model Representation***
+
+The House Prices analysis demonstrated the value of feature engineering.
+
+The regression analysis included:
+  
+  •	  polynomial terms;
+  •	  interaction terms;
+  •	  age-related variables;
+  •	  categorical encoding;
+  •	  response transformation;
+  •	  subset selection; and
+  •	PCA-based dimension reduction.
+
+The polynomial terms allow the model to represent curvature. For example, the effect of living area on price may not remain constant across the entire range of property sizes.
+
+The interaction terms allow the effect of one predictor to depend on another predictor. For example, the association between living area and price can differ according to overall property quality.
+
+The age variables provide additional information about the relationship between property age, remodeling, and sale price.
+
+These transformations demonstrate that predictive performance depends not only on the statistical algorithm but also on how the underlying data-generating structure is represented.
+
+## Validation Must Match the Prediction Problem
+
+The three analyses also demonstrate why validation procedures should reflect the structure of the prediction task.
+
+For Store Sales, a chronological validation split was used because future observations should not be used to predict earlier observations.
+
+For House Prices, a separate validation sample was used to evaluate competing regression specifications.
+
+For Crime Classification, a held-out validation sample was used to evaluate classification accuracy and class-level performance.
+
+The appropriate validation design therefore depends on the prediction problem.
+
+Randomly mixing observations in a time-series problem can create temporal information leakage, while an ordinary random split in a geographically and temporally clustered classification problem may not fully reproduce the conditions of future prediction.
+
+Consequently, validation results should always be interpreted in the context of how the validation sample was constructed.
+
+## Different Metrics Answer Different Questions
+
+A major cross-analysis finding is that no single metric provides a complete description of model performance.
+
+For Store Sales, MAE and RMSE produced slightly different comparisons between ETS and ARIMA.
+
+For House Prices, raw-scale and log-scale evaluation produced substantially different interpretations. Model A had a raw-scale RMSE of 63,125 but a log-scale RMSE of 0.1704.
+
+For Crime Classification, accuracy, macro F1, weighted F1, and log loss produced different model comparisons.
+
+This occurs because the metrics emphasize different aspects of prediction.
+
+MAE treats absolute errors linearly, while RMSE gives greater weight to large errors.
+
+Log-transformed regression metrics emphasize proportional differences more strongly than raw-dollar metrics.
+
+Macro F1 gives each classification category equal weight, while weighted F1 incorporates class frequency.
+
+Log loss evaluates the quality of predicted probabilities rather than only whether the most likely class was correct.
+
+The interpretation of model performance must therefore begin with the question being answered by the metric.
+
+## Assumptions Across the Three Analytical Problems
+
+The assignment required investigation of assumptions associated with the selected models. The analysis approached this requirement differently for each problem because forecasting, regression, and classification models have different assumptions.
+
+**Time-Series Assumptions**
+
+The Store Sales analysis assumed that the aggregate daily series contained meaningful temporal structure that could be represented through trend and weekly seasonality.
+
+The observed day-of-week pattern provided empirical evidence supporting a seven-day seasonal structure.
+The ETS model therefore used a seasonal period of seven, while the ARIMA analysis considered several autoregressive and moving-average specifications.
+
+**The analysis also investigated residual behavior**.
+
+A well-specified forecasting model should leave residuals that do not contain substantial systematic temporal structure. If residuals retain strong autocorrelation, the model has not captured all predictable information in the series.
+
+The saved residual artifacts provide evidence for evaluating this issue.
+
+The analysis did not report numerical Ljung-Box statistics because those statistics were not included in the generated result artifacts. Reporting a numerical test that was not actually calculated would incorrectly imply additional analysis.
+
+This distinction is important for reproducibility.
+
+**Regression Assumptions**
+
+The House Prices analysis considered the major assumptions relevant to linear regression:
+
+  •	  linearity;
+  •	  constant variance;
+  •	  independence;
+  •	  residual behavior;
+  •	  influential observations; and
+  •	  multicollinearity.
+
+The use of polynomial and interaction terms was specifically intended to allow more flexible relationships than a simple linear specification.
+
+The log transformation of SalePrice also addressed the strong positive skew commonly associated with monetary outcomes and reduced the influence of extremely expensive observations on the transformed response scale.
+
+The high-dimensional encoded predictor matrix created potential multicollinearity concerns. The PCA Ridge model provided an alternative approach in which correlated predictors were transformed into orthogonal principal components before regression.
+
+The residual diagnostic artifacts should be interpreted as evidence about the extent to which the fitted model conforms to these assumptions.
+
+No diagnostic should be interpreted as proving that an assumption is perfectly satisfied. Statistical assumptions are modeling approximations, and the objective is to determine whether violations are substantial enough to affect the intended analysis.
+
+**Classification Assumptions**
+
+Classification models have different requirements from ordinary linear regression.
+
+The Crime Classification analysis focused on:
+
+  •	  class imbalance;
+  •	  independence;
+  •	  feature representation;
+  •	  potential leakage;
+  •	  tree complexity; and
+  •	  the adequacy of the SVM representation.
+  
+Class imbalance was particularly important because overall accuracy can be strongly influenced by common classes.
+
+The relatively low macro F1 values demonstrate that classification performance varies across crime categories.
+
+The exclusion of Descript and Resolution from the primary feature set also addressed potential leakage concerns.
+
+The analysis therefore considered not only whether the models could predict the response, but also whether the predictors represented information that was appropriate for the intended prediction task.
+
+## Comparative Discussion of the Three Problems
+
+The three competitions required fundamentally different forms of statistical reasoning.
+
+**Forecasting**
+
+The Store Sales problem emphasized temporal dependence.
+
+The most important structural findings were:
+
+  •	  strong weekly seasonality;
+  •	  substantial holiday effects;
+  •	  changing sales levels over time; and
+  •	  the importance of recent observations for short-horizon prediction.
+
+The forecasting models therefore needed to account for temporal structure rather than treating observations as independent.
+
+**Regression**
+
+The House Prices problem emphasized the relationship between a continuous response and a large collection of predictors.
+
+The analysis demonstrated that:
+
+  •	  categorical variables require appropriate encoding;
+  •	  nonlinear relationships can be represented with polynomial terms;
+  •	  interactions allow conditional relationships;
+  •	  response transformations can substantially affect model behavior;
+  •	  correlated predictors motivate dimension-reduction or regularization approaches.
+
+The regression analysis therefore emphasized representation, transformation, and assumption diagnostics.
+
+**Classification**
+
+The Crime Classification problem emphasized multiclass prediction.
+
+The results demonstrated that:
+
+  •	  accuracy alone can be misleading;
+  •	  class-level performance must be examined;
+  •	  feature representation affects classification performance;
+  •	  tree-based and linear classification methods can produce different performance profiles;
+  •	  probability-based metrics provide information that hard-class predictions do not.
+
+The classification analysis therefore emphasized both aggregate and class-level evaluation.
+
+# Model Limitations
+
+Several limitations should be considered when interpreting the complete Assignment 8 analysis.
+
+## Store Sales Limitations
+
+The Store Sales analysis aggregated the original store-family observations to a single daily sales series.
+
+This approach was useful for implementing the required ETS and ARIMA models but necessarily discarded information about individual stores and product families.
+
+The resulting models therefore address aggregate daily sales rather than the complete hierarchical structure of the competition.
+
+The validation period also contained only 16 observations. A small validation window means that individual unusual days can have a substantial effect on the calculated error metrics.
+
+The analysis also treated four missing Christmas observations as zero sales after establishing that they corresponded to Christmas holidays. Although this decision is supported by the structure of the data, it remains an explicit modeling assumption.
+
+Finally, the required models did not fully exploit potentially informative exogenous variables such as promotions, store characteristics, holidays, and other economic information.
+
+## House Prices Limitations
+
+The House Prices analysis used a single validation split containing 292 observations.
+
+A different validation split could produce different numerical estimates of model performance.
+
+The engineered linear model also depends on the selected subset of predictors and transformations.
+
+Although the polynomial and interaction terms were required by the assignment, the exact functional form remains an approximation to the underlying relationship between property characteristics and sale price.
+
+The PCA model also demonstrates an important limitation of dimension reduction: retaining 95.07% of predictor variance does not necessarily mean retaining 95.07% of predictive information about the response.
+
+PCA is unsupervised with respect to the response, so components explaining substantial predictor variance are not necessarily the components most useful for predicting SalePrice.
+
+## Crime Classification Limitations
+
+The Crime Classification problem contains many response categories, making accurate prediction inherently difficult.
+
+Class imbalance can cause accuracy to provide an incomplete representation of performance.
+
+The validation sample may also contain temporal and geographic relationships with the training sample. Consequently, the reported validation performance should not automatically be interpreted as an estimate of performance under every possible future deployment scenario.
+
+The classification models also use only the selected feature representation. Important information not represented in those predictors cannot be learned by the algorithms.
+
+Finally, the local validation results and Kaggle leaderboard results evaluate different observations and should not be expected to match.
+
+# Kaggle Submission Status
+
+The Python analysis generated submission artifacts for all required models.
+
+The completed submission files include:
+
+## Store Sales
+
+  •	  store_sales_ets_submission
+  •	  store_sales_arima_submission
+
+## House Prices
+
+  •	  house_prices_model_a_submission.csv
+  •	  house_prices_model_b_submission.csv
+
+##  San Francisco Crime Classification
+
+  •	  crime_decision_tree_submission.csv
+  •	  crime_random_forest_submission.csv
+  •	  crime_svm_submission.csv
+
+These files document that predictions were generated for the competition test observations.
+
+The competition results reported in this document are external evaluation results provided by Kaggle. They should therefore be distinguished from the local validation metrics used during model development.
+
+# Overall Conclusions
+
+Assignment 8 demonstrates the development and evaluation of predictive models across forecasting, regression, and classification problems.
+
+##Store Sales Conclusion
+
+The Store Sales analysis identified substantial temporal structure in aggregate daily sales.
+Weekly seasonality was particularly strong, with Sunday and Saturday having the highest average sales and Thursday having the lowest average sales among the reported days.
+
+The analysis also identified substantial New Year's Day effects and confirmed that the missing Christmas observations corresponded to meaningful calendar events.
+
+Both required forecasting models improved substantially upon the naive benchmarks.
+
+  -   ETS produced a validation MAE of 82,459.79 and RMSE of 113,065.78.
+  -   ARIMA(1,1,1) produced a validation MAE of 98,728.22 and RMSE of 111,986.09.
+
+The 7-day moving average produced a slightly lower validation RMSE of 109,822.48.
+
+These findings demonstrate that recent local sales information was highly useful for the short forecasting horizon and that model complexity did not automatically produce the lowest error.
+
+The required ETS and ARIMA models nevertheless provided useful and interpretable statistical representations of the series.
+
+## House Prices Conclusion
+
+The House Prices analysis demonstrated the importance of feature engineering, transformation, and dimensionality considerations.
+
+The engineered linear regression incorporated the required polynomial and interaction terms and used a log-transformed response.
+
+It achieved a validation Log RMSE of 0.1704 and Log R² of 0.8244.
+
+The PCA Ridge model reduced the encoded predictor space from 290 variables to 71 components while retaining approximately 95.07% of the predictor variance.
+
+However, its validation Log RMSE of 0.1962 was higher than the engineered linear model's 0.1704.
+
+This finding demonstrates that dimensionality reduction does not necessarily improve predictive accuracy.
+
+The engineered linear model was therefore selected for final model development according to the prespecified validation Log RMSE criterion.
+
+## Crime Classification Conclusion
+
+The San Francisco Crime Classification analysis demonstrated the importance of evaluating multiclass models using multiple metrics.
+
+The Decision Tree achieved:
+  
+  •	  Accuracy = 0.2683
+  •	  Macro F1 = 0.0901
+  •	  Weighted F1 = 0.2254
+  •	  Log loss = 6.0718
+
+The Random Forest achieved:
+
+  •	  Accuracy = 0.2821
+  •	  Macro F1 = 0.0693
+  •	  Weighted F1 = 0.2055
+  •	  Log loss = 2.4049
+
+The Linear SVM achieved:
+  
+  •	  Accuracy = 0.2817
+  •	  Macro F1 = 0.0885
+  •	  Weighted F1 = 0.2318
+
+The models therefore produced different performance profiles.
+
+The Random Forest had the highest reported validation accuracy and substantially lower log loss than the Decision Tree.
+
+The SVM produced nearly identical accuracy to the Random Forest while achieving higher reported macro and weighted F1 values.
+
+The Decision Tree produced the highest reported macro F1.
+
+These results demonstrate why multiclass classification should not be evaluated using accuracy alone.
+
+## Overall Modeling Conclusion
+
+The most important conclusion across Assignment 8 is that predictive modeling requires more than selecting an algorithm and calculating one performance statistic.
+
+The analysis required:
+
+  -   1.	understanding the structure of each dataset;
+  -   2.	constructing appropriate features;
+  -   3.	separating training and validation observations;
+  -   4.	selecting models using out-of-sample evidence;
+  -   5.	investigating assumptions;
+  -   6.	examining diagnostic artifacts;
+  -   7.	comparing multiple evaluation metrics;
+  -   8.	generating competition predictions; and
+  -   9.	distinguishing local validation from external Kaggle evaluation.
+
+The results also demonstrate that more complicated methods do not automatically produce better predictions.
+
+A simple moving average was competitive with the required Store Sales forecasting models.
+
+The engineered linear regression outperformed the PCA Ridge alternative on validation Log RMSE despite using a substantially different representation.
+
+The Crime Classification models produced similar accuracy but materially different class-level and probability-based metrics.
+
+These findings reinforce the importance of matching the modeling approach and evaluation strategy to the structure of the prediction problem.
+
+Finally, the Kaggle submissions provide an external evaluation of the generated predictions. Local validation results were used for model development and selection, while Kaggle scores provide a separate assessment using hidden competition targets.
+
+# References
+
+Breiman, L. (2001). Random forests. Machine Learning, 45, 5–32. https://doi.org/10.1023/A:1010933404324
+
+Cortes, C., & Vapnik, V. (1995). Support-vector networks. Machine Learning, 20, 273–297. https://doi.org/10.1007/BF00994018
+
+De Cock, D. (2011). Ames, Iowa: Alternative to the Boston housing data as an end of semester regression project. Journal of Statistics Education, 19(3). https://doi.org/10.1080/10691898.2011.11889627
+
+Hyndman, R. J., & Athanasopoulos, G. (2021). Forecasting: Principles and practice (3rd ed.). OTexts. https://otexts.com/fpp3/
+
+Hyndman, R. J., & Khandakar, Y. (2008). Automatic time series forecasting: The forecast package for R. Journal of Statistical Software, 27(3), 1–22. https://doi.org/10.18637/jss.v027.i03
+
+James, G., Witten, D., Hastie, T., Tibshirani, R., & Taylor, J. (2023). An introduction to statistical learning: With applications in Python. Springer. https://doi.org/10.1007/978-3-031-38747-0
+
+Kaggle. (2016). House prices: Advanced regression techniques [Data set]. Kaggle. https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques
+
+Kaggle. (2021). Store sales: Time series forecasting [Data set]. Kaggle. https://www.kaggle.com/competitions/store-sales-time-series-forecasting
+

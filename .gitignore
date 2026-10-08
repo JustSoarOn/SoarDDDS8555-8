@@ -1,0 +1,26 @@
+# RStudio
+.Rhistory
+.RData
+.Rproj.user/
+
+# Generated assignment output
+output/
+
+# Python cache
+__pycache__/
+*.py[c]
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# R temporary workspace files
+.RDataTmp*
+
+
+# Large Kaggle training datasets excluded because of GitHub 100 MB file limit
+data/san_francisco_crime_classification/train.csv
+data/store_sales_time_series_forecasting/train.csv
+
+
+
